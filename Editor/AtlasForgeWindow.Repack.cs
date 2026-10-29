@@ -14,8 +14,6 @@ namespace AtlasForge.Editor
 
         private void DrawRepackSourceSection()
         {
-            EditorGUILayout.LabelField("Source", EditorStyles.boldLabel);
-
             EditorGUI.BeginChangeCheck();
             _repackAtlas = AtlasField("Sliced Atlas", _repackAtlas);
             if (EditorGUI.EndChangeCheck())
@@ -29,38 +27,38 @@ namespace AtlasForge.Editor
             {
                 EditorGUILayout.HelpBox(_repackSet.Error, MessageType.Warning);
             }
-            else if (_repackSet.IsLoaded && _repackSet.Atlases.Count == 1)
-            {
-                AtlasSlices slices = _repackSet.Atlases[0];
-                float fill = SpriteAtlasBuilder.FillRatio(slices.Entries, slices.Width, slices.Height);
-                int marked = _repackSet.Configs.Count(config => config.MarkedForDeletion);
-                EditorGUILayout.LabelField(
-                    $"{slices.Width}x{slices.Height}  ·  {slices.Entries.Count} slices  ·  {fill:P1} filled" +
-                    (marked > 0 ? $"  ·  {marked} marked for deletion" : ""),
-                    EditorStyles.miniLabel);
-
-                if (GUILayout.Button(new GUIContent(
-                        "Select Duplicates",
-                        "Selects every slice whose pixels exactly match an earlier slice, ready to be marked for deletion.")))
-                {
-                    SelectDuplicateSlices(slices);
-                }
-            }
         }
 
-        /// <summary>Repack-tab controls under Sprite Details that mark or unmark the selected slices for deletion.</summary>
+        /// <summary>Footer status: atlas size, slice count, fill and pending deletions.</summary>
+        private string RepackStatus()
+        {
+            if (!_repackSet.IsLoaded || _repackSet.Atlases.Count != 1)
+            {
+                return "No atlas selected.";
+            }
+
+            AtlasSlices slices = _repackSet.Atlases[0];
+            float fill = SpriteAtlasBuilder.FillRatio(slices.Entries, slices.Width, slices.Height);
+            int marked = _repackSet.Configs.Count(config => config.MarkedForDeletion);
+            return $"{slices.Width}×{slices.Height}  ·  {slices.Entries.Count} slices  ·  {fill:P1} filled" +
+                   (marked > 0 ? $"  ·  {marked} marked for deletion" : "");
+        }
+
+        /// <summary>Repack-tab row in the selection panel that marks or unmarks the selected slices for deletion.</summary>
         private void DrawDeletionControls(List<SpriteBorderConfig> selected)
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                if (GUILayout.Button($"Mark for Deletion ({selected.Count})"))
+                EditorGUILayout.PrefixLabel(new GUIContent(
+                    "Deletion", "Marked slices are removed on the next Repack. Delete toggles the mark on the selection."));
+                if (GUILayout.Button($"Mark ({selected.Count})", EditorStyles.miniButtonLeft))
                 {
                     SetMarkedForDeletion(selected, true);
                 }
 
                 using (new EditorGUI.DisabledScope(!selected.Any(config => config.MarkedForDeletion)))
                 {
-                    if (GUILayout.Button("Unmark"))
+                    if (GUILayout.Button("Unmark", EditorStyles.miniButtonRight))
                     {
                         SetMarkedForDeletion(selected, false);
                     }
@@ -105,17 +103,6 @@ namespace AtlasForge.Editor
             }
         }
 
-        private void DrawRepackButton()
-        {
-            using (new EditorGUI.DisabledScope(!_repackSet.IsLoaded || _repackSet.Atlases.Count != 1))
-            {
-                if (GUILayout.Button("Repack Atlas", GUILayout.Height(32f)))
-                {
-                    Repack();
-                }
-            }
-        }
-
         /// <summary>Loads the repack atlas's slices on first use, e.g. after a domain reload dropped them.</summary>
         private void EnsureRepackLoaded()
         {
@@ -145,6 +132,7 @@ namespace AtlasForge.Editor
             var kept = new List<int>();
             var deleted = new List<int>();
             bool bordersChanged = false;
+            bool rectsChanged = false;
             for (int i = 0; i < entries.Count; i++)
             {
                 SpriteBorderConfig config = _repackSet.FindConfig(slices, i);
@@ -157,6 +145,7 @@ namespace AtlasForge.Editor
                 kept.Add(i);
                 borders[i] = ResolveBorder(config, entries[i]);
                 bordersChanged |= borders[i] != entries[i].Border;
+                rectsChanged |= slices.IsRectEdited(i);
             }
 
             if (kept.Count == 0)
@@ -227,7 +216,7 @@ namespace AtlasForge.Editor
                 string reason = packed
                     ? $"'{atlasName}' ({oldWidth}x{oldHeight}, {oldFill:P1} filled) can't be packed any tighter with the current settings."
                     : $"The slices don't fit within {_maxAtlasSize}px. Increase Max Atlas Size or lower Padding.";
-                if (!bordersChanged && deleted.Count == 0)
+                if (!bordersChanged && !rectsChanged && deleted.Count == 0)
                 {
                     EditorUtility.DisplayDialog("AtlasForge", reason, "OK");
                     return;
@@ -258,8 +247,15 @@ namespace AtlasForge.Editor
                 message.Append("\n9-slice border edits are applied.\n");
             }
 
+            if (rectsChanged)
+            {
+                message.Append(relayout
+                    ? "\nMoved or resized slices are re-cut from their new rects.\n"
+                    : "\nMoved or resized slices now point at their new rects in the atlas.\n");
+            }
+
             message.Append("\nThe atlas is overwritten in place; references to kept slices are unaffected.");
-            string confirmLabel = relayout ? "Repack" : deleted.Count > 0 ? "Delete Slices" : "Apply Borders";
+            string confirmLabel = relayout ? "Repack" : deleted.Count > 0 ? "Delete Slices" : "Apply Changes";
             if (!EditorUtility.DisplayDialog("AtlasForge", message.ToString(), confirmLabel, "Cancel"))
             {
                 return;
@@ -323,7 +319,8 @@ namespace AtlasForge.Editor
 
             Debug.Log(log.ToString());
 
-            // Pick up the rewritten layout and borders.
+            // Pick up the rewritten layout and borders; rect edits are now part of the atlas.
+            _repackSet.ClearRectEdits();
             LoadRepackSet();
             EditorGUIUtility.PingObject(_repackAtlas);
         }

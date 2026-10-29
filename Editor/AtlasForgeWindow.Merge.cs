@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 
 namespace AtlasForge.Editor
@@ -13,45 +14,24 @@ namespace AtlasForge.Editor
         [SerializeField] private bool _trashMergedSources;
         [SerializeField] private AtlasSliceSet _mergeSet = new();
 
+        private ReorderableList _mergeList;
+
+        // Set by list callbacks (some run outside OnGUI, from menus); the set reloads on the next draw.
+        private bool _mergeListChanged;
+
         private void DrawMergeSourceSection()
         {
-            EditorGUILayout.LabelField("Source", EditorStyles.boldLabel);
-
-            bool changed = false;
-            int removeIndex = -1;
-            for (int i = 0; i < _mergeAtlases.Count; i++)
+            // The list wraps _mergeAtlases itself, so rebuild it whenever that list is replaced.
+            if (_mergeList == null || _mergeList.list != _mergeAtlases)
             {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    EditorGUI.BeginChangeCheck();
-                    _mergeAtlases[i] = AtlasField($"Atlas {i + 1}", _mergeAtlases[i]);
-                    changed |= EditorGUI.EndChangeCheck();
-
-                    if (GUILayout.Button("−", GUILayout.Width(22f)))
-                    {
-                        removeIndex = i;
-                    }
-                }
+                _mergeList = CreateMergeList();
             }
 
-            if (removeIndex >= 0)
-            {
-                changed |= _mergeAtlases[removeIndex] != null;
-                _mergeAtlases.RemoveAt(removeIndex);
-            }
+            _mergeList.DoLayoutList();
+            HandleAtlasDrop(GUILayoutUtility.GetLastRect());
 
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                if (GUILayout.Button("Add Atlas"))
-                {
-                    _mergeAtlases.Add(null);
-                }
-
-                if (GUILayout.Button(new GUIContent("Add Selected", "Adds the sliced atlases selected in the Project window.")))
-                {
-                    changed |= AddSelectedAtlases();
-                }
-            }
+            bool changed = _mergeListChanged;
+            _mergeListChanged = false;
 
             List<Texture2D> atlases = ValidMergeAtlases();
             if (atlases.Count > 0)
@@ -81,36 +61,116 @@ namespace AtlasForge.Editor
             {
                 EditorGUILayout.HelpBox(_mergeSet.Error, MessageType.Warning);
             }
-            else if (_mergeSet.IsLoaded && _mergeSet.Atlases.Count > 0)
-            {
-                EditorGUILayout.LabelField(
-                    $"{_mergeSet.Atlases.Count} atlases  ·  {_mergeSet.Atlases.Sum(atlas => atlas.Entries.Count)} slices",
-                    EditorStyles.miniLabel);
-            }
         }
 
-        private void DrawMergeButton()
+        /// <summary>Footer status: how many atlases and slices are loaded for the merge.</summary>
+        private string MergeStatus()
         {
-            using (new EditorGUI.DisabledScope(!_mergeSet.IsLoaded || _mergeSet.Atlases.Count < 2))
+            if (!_mergeSet.IsLoaded || _mergeSet.Atlases.Count == 0)
             {
-                if (GUILayout.Button("Merge Atlases", GUILayout.Height(32f)))
-                {
-                    Merge();
-                }
+                return "Add two or more sliced atlases.";
             }
+
+            string status = $"{_mergeSet.Atlases.Count} atlases  ·  {_mergeSet.Atlases.Sum(atlas => atlas.Entries.Count)} slices";
+            return _mergeSet.Atlases.Count < 2 ? status + "  ·  add another atlas to merge" : status;
+        }
+
+        private ReorderableList CreateMergeList()
+        {
+            float lineHeight = EditorGUIUtility.singleLineHeight;
+            var list = new ReorderableList(_mergeAtlases, typeof(Texture2D), true, true, true, true)
+            {
+                elementHeight = lineHeight + 4f,
+                drawHeaderCallback = rect => EditorGUI.LabelField(
+                    rect, new GUIContent("Atlases to Merge", "Drop sliced atlases here, or add them with the + button.")),
+                drawElementCallback = (rect, index, _, _) =>
+                {
+                    rect = new Rect(rect.x, rect.y + 2f, rect.width, lineHeight);
+                    EditorGUI.BeginChangeCheck();
+                    var atlas = (Texture2D)EditorGUI.ObjectField(rect, _mergeAtlases[index], typeof(Texture2D), false);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        _mergeAtlases[index] = atlas;
+                        _mergeListChanged = true;
+                    }
+                },
+                onRemoveCallback = reorderable =>
+                {
+                    _mergeListChanged |= _mergeAtlases[reorderable.index] != null;
+                    _mergeAtlases.RemoveAt(reorderable.index);
+                    reorderable.index = Mathf.Clamp(reorderable.index, 0, _mergeAtlases.Count - 1);
+                },
+                onAddDropdownCallback = (rect, _) =>
+                {
+                    var menu = new GenericMenu();
+                    menu.AddItem(new GUIContent("Empty Slot"), false, () =>
+                    {
+                        _mergeAtlases.Add(null);
+                        Repaint();
+                    });
+                    List<Texture2D> selected = SelectedSlicedAtlases().ToList();
+                    var addSelected = new GUIContent($"Selected in Project ({selected.Count})");
+                    if (selected.Count > 0)
+                    {
+                        menu.AddItem(addSelected, false, () =>
+                        {
+                            _mergeListChanged |= AddAtlases(selected);
+                            Repaint();
+                        });
+                    }
+                    else
+                    {
+                        menu.AddDisabledItem(addSelected);
+                    }
+
+                    menu.DropDown(rect);
+                }
+            };
+
+            return list;
+        }
+
+        /// <summary>Accepts sliced atlases dragged from the Project window onto the list.</summary>
+        private void HandleAtlasDrop(Rect rect)
+        {
+            Event current = Event.current;
+            if (current.type is not (EventType.DragUpdated or EventType.DragPerform) || !rect.Contains(current.mousePosition))
+            {
+                return;
+            }
+
+            List<Texture2D> atlases = DragAndDrop.objectReferences.OfType<Texture2D>().Where(IsSlicedAtlas).ToList();
+            if (atlases.Count == 0)
+            {
+                return;
+            }
+
+            DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
+            if (current.type == EventType.DragPerform)
+            {
+                DragAndDrop.AcceptDrag();
+                _mergeListChanged |= AddAtlases(atlases);
+            }
+
+            current.Use();
         }
 
         /// <summary>Distinct, assigned atlases from the list, in list order.</summary>
         private List<Texture2D> ValidMergeAtlases() => _mergeAtlases.Where(atlas => atlas != null).Distinct().ToList();
 
-        /// <summary>Appends the sliced textures selected in the Project window; returns whether any were added.</summary>
-        private bool AddSelectedAtlases()
+        private static IEnumerable<Texture2D> SelectedSlicedAtlases() =>
+            Selection.GetFiltered<Texture2D>(SelectionMode.Assets).Where(IsSlicedAtlas);
+
+        private static bool IsSlicedAtlas(Texture2D texture) =>
+            AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(texture)) is TextureImporter { spriteImportMode: SpriteImportMode.Multiple };
+
+        /// <summary>Appends the given atlases that aren't listed yet; returns whether any were added.</summary>
+        private bool AddAtlases(IEnumerable<Texture2D> textures)
         {
             bool added = false;
-            foreach (Texture2D texture in Selection.GetFiltered<Texture2D>(SelectionMode.Assets))
+            foreach (Texture2D texture in textures)
             {
-                if (_mergeAtlases.Contains(texture) ||
-                    AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(texture)) is not TextureImporter { spriteImportMode: SpriteImportMode.Multiple })
+                if (_mergeAtlases.Contains(texture))
                 {
                     continue;
                 }
@@ -195,7 +255,8 @@ namespace AtlasForge.Editor
 
             Debug.Log("[AtlasForge] " + summary);
 
-            // Only the merged atlas is left to work with.
+            // Only the merged atlas is left to work with; rect edits are now part of it.
+            _mergeSet.ClearRectEdits();
             _mergeAtlases = new List<Texture2D> { _mergeTarget };
             LoadMergeSet();
             EditorGUIUtility.PingObject(_mergeTarget);

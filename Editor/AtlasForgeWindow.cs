@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UnityEditor;
+using UnityEditor.IMGUI.Controls;
 using UnityEngine;
 
 namespace AtlasForge.Editor
@@ -32,6 +33,15 @@ namespace AtlasForge.Editor
 
         /// <summary>Atlas slice to remove on the next repack.</summary>
         public bool MarkedForDeletion;
+
+        /// <summary>Whether the slice was moved or resized in the window (atlas slices only).</summary>
+        public bool SliceRectEdited;
+
+        /// <summary>The edited slice rect, in atlas pixels (bottom-up).</summary>
+        public RectInt SliceRect;
+
+        /// <summary>The imported rect the edit started from; the edit is dropped if the atlas no longer matches it.</summary>
+        public RectInt SliceRectBase;
     }
 
     /// <summary>
@@ -41,6 +51,11 @@ namespace AtlasForge.Editor
     /// existing sliced atlas in place and merge several sliced atlases into one,
     /// editing their slices' borders the same way.
     /// </summary>
+    /// <remarks>
+    /// Layout, top to bottom: tab toolbar, the tab's source fields, collapsible packing
+    /// settings, the sprite grid (which takes the spare height), a resizable selection
+    /// panel, and a fixed footer with the tab's status and primary action.
+    /// </remarks>
     public sealed partial class AtlasForgeWindow : EditorWindow
     {
         private enum WindowTab
@@ -51,24 +66,27 @@ namespace AtlasForge.Editor
         }
 
         private static readonly string[] TabLabels = { "Pack Folder", "Repack Atlas", "Merge Atlases" };
+        private static readonly string[] BorderModeLabels = { "None", "Manual", "Auto" };
 
         private const int DefaultPadding = 2;
 
-        // Grid layout metrics.
-        private const float ThumbSize = 72f;
+        // Grid layout metrics; the thumbnail size itself is user-adjustable.
+        private const float MinThumbSize = 40f;
+        private const float MaxThumbSize = 128f;
         private const float CellLabelHeight = 14f;
         private const float CellPadding = 4f;
-        private const float CellWidth = ThumbSize + CellPadding * 2f;
-        private const float CellHeight = ThumbSize + CellLabelHeight + CellPadding * 2f;
         private const float BadgeSize = 14f;
-        private const float BorderPreviewSize = 220f;
         private const float FocusOutlineThickness = 2f;
+        private const float MinGridHeight = 120f;
 
-        // Resizable grid metrics: drag handles clamp between a fixed minimum and the
-        // height needed to fit all content (no point growing further than that).
-        private const float MinGridHeight = 160f;
-        private const float MinDetailsGridHeight = 100f;
-        private const float ResizeHandleHeight = 6f;
+        // Selection panel metrics.
+        private const float BorderPreviewSize = 136f;
+        private const float MaxEditablePreviewSize = 512f;
+        private const float GuideHitSize = 5f;
+        private const float GuideGripSize = 6f;
+        private const float MinInspectorHeight = 90f;
+        private const float SplitterHeight = 5f;
+        private const float FooterButtonWidth = 150f;
 
         private static readonly Color SelectionColor = new(0.24f, 0.48f, 0.90f, 0.35f);
         private static readonly Color FocusOutlineColor = new(1f, 0.8f, 0.2f, 1f);
@@ -76,10 +94,15 @@ namespace AtlasForge.Editor
         private static readonly Color NoneBadgeColor = new(0.4f, 0.4f, 0.4f, 0.9f);
         private static readonly Color AutoBadgeColor = new(0.25f, 0.55f, 0.95f, 0.9f);
         private static readonly Color ManualBadgeColor = new(0.95f, 0.55f, 0.15f, 0.9f);
-        private static readonly Color ResizeHandleColor = new(0f, 0f, 0f, 0.35f);
         private static readonly Color DeletedOverlayColor = new(0.6f, 0.05f, 0.05f, 0.55f);
 
+        private static Color SeparatorColor => EditorGUIUtility.isProSkin ? new Color(0.1f, 0.1f, 0.1f) : new Color(0.6f, 0.6f, 0.6f);
+        private static Color GridBackgroundColor => EditorGUIUtility.isProSkin ? new Color(0.16f, 0.16f, 0.16f) : new Color(0.76f, 0.76f, 0.76f);
+
         private static GUIStyle _deletedMarkStyle;
+        private static GUIStyle _cellLabelStyle;
+        private static GUIStyle _sectionStyle;
+        private static GUIStyle _hintStyle;
 
         private static GUIStyle DeletedMarkStyle => _deletedMarkStyle ??= new GUIStyle(EditorStyles.boldLabel)
         {
@@ -87,6 +110,17 @@ namespace AtlasForge.Editor
             fontSize = 28,
             normal = { textColor = Color.white }
         };
+
+        private static GUIStyle CellLabelStyle => _cellLabelStyle ??= new GUIStyle(EditorStyles.miniLabel)
+        {
+            alignment = TextAnchor.UpperCenter,
+            clipping = TextClipping.Clip
+        };
+
+        /// <summary>Inner padding for the stacked sections, matching the Inspector's margins.</summary>
+        private static GUIStyle SectionStyle => _sectionStyle ??= new GUIStyle { padding = new RectOffset(8, 8, 6, 6) };
+
+        private static GUIStyle HintStyle => _hintStyle ??= new GUIStyle(EditorStyles.centeredGreyMiniLabel) { wordWrap = true };
 
         [SerializeField] private WindowTab _tab;
         [SerializeField] private DefaultAsset _sourceFolder;
@@ -103,20 +137,33 @@ namespace AtlasForge.Editor
         [SerializeField] private float _detailsUniformValue = 8f;
         [SerializeField] private Vector4 _detailsBorder = new(8f, 8f, 8f, 8f);
 
-        // User-adjustable heights for the resizable grids, persisted across sessions.
-        [SerializeField] private float _gridHeight = 280f;
-        [SerializeField] private float _detailsGridHeight = 160f;
+        // View preferences, persisted across sessions.
+        [SerializeField] private bool _showPackingSettings;
+        [SerializeField] private float _thumbSize = 72f;
+        [SerializeField] private float _inspectorHeight = 240f;
+        [SerializeField] private string _search = "";
 
         private Vector2 _scroll;
-        private Vector2 _detailsScroll;
+        private Vector2 _inspectorScroll;
         private SpriteBorderConfig _focusedConfig;
+
+        // The single sprite whose border the selection panel is live-editing, and the guide being dragged on its preview.
+        private SpriteBorderConfig _detailsLoadedFor;
+        private int _draggedGuide = -1;
         private bool _isDragSelecting;
-        private bool _isResizingGrid;
-        private bool _isResizingDetailsGrid;
+        private bool _isResizingInspector;
+        private SearchField _searchField;
+
+        // Measured on repaint to size the grid to the window's spare height.
+        private float _gridTop = 100f;
+        private float _footerHeight = 40f;
 
         // Session-only caches; never serialized.
         private readonly Dictionary<string, Texture2D> _previewCache = new();
         private readonly Dictionary<string, Texture2D> _readableCache = new();
+
+        private float CellWidth => _thumbSize + CellPadding * 2f;
+        private float CellHeight => _thumbSize + CellLabelHeight + CellPadding * 2f;
 
         /// <summary>The atlas slices the current tab edits, or null on the folder tab.</summary>
         private AtlasSliceSet ActiveSliceSet => _tab switch
@@ -129,11 +176,16 @@ namespace AtlasForge.Editor
         /// <summary>The sprite list the shared grid and details sections edit on the current tab.</summary>
         private List<SpriteBorderConfig> ActiveConfigs => ActiveSliceSet?.Configs ?? _borderConfigs;
 
+        /// <summary>The current tab's sprites that match the search filter, in grid order.</summary>
+        private List<SpriteBorderConfig> VisibleConfigs => string.IsNullOrEmpty(_search)
+            ? ActiveConfigs
+            : ActiveConfigs.Where(config => config.Name.IndexOf(_search, System.StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+
         // Ctrl+Alt+A (Cmd+Alt+A on macOS); rebindable under Edit > Shortcuts.
         [MenuItem("Tools/AtlasForge %&a")]
         private static void Open()
         {
-            GetWindow<AtlasForgeWindow>("AtlasForge").minSize = new Vector2(520f, 640f);
+            GetWindow<AtlasForgeWindow>("AtlasForge").minSize = new Vector2(480f, 560f);
         }
 
         private void OnDisable()
@@ -145,229 +197,398 @@ namespace AtlasForge.Editor
 
         private void OnGUI()
         {
-            DrawTabs();
-
             switch (_tab)
             {
                 case WindowTab.Repack:
                     EnsureRepackLoaded();
-                    DrawBoxedSection(DrawRepackSourceSection);
                     break;
                 case WindowTab.Merge:
                     EnsureMergeLoaded();
-                    DrawBoxedSection(DrawMergeSourceSection);
-                    break;
-                default:
-                    DrawBoxedSection(DrawSourceSection);
                     break;
             }
 
-            DrawBoxedSection(DrawSettingsSection);
-            DrawBoxedSection(DrawBulkToolbar);
-            DrawBoxedSection(DrawSpriteGrid);
-            DrawBoxedSection(DrawDetailsSection);
+            DrawToolbar();
 
-            switch (_tab)
+            using (new EditorGUILayout.VerticalScope(SectionStyle))
             {
-                case WindowTab.Repack:
-                    DrawRepackButton();
-                    break;
-                case WindowTab.Merge:
-                    DrawMergeButton();
-                    break;
-                default:
-                    DrawPackButton();
-                    break;
+                switch (_tab)
+                {
+                    case WindowTab.Repack:
+                        DrawRepackSourceSection();
+                        break;
+                    case WindowTab.Merge:
+                        DrawMergeSourceSection();
+                        break;
+                    default:
+                        DrawSourceSection();
+                        break;
+                }
             }
+
+            DrawPackingSettings();
+            DrawGridToolbar();
+            DrawSpriteGrid();
+            DrawInspectorSplitter();
+
+            _inspectorScroll = EditorGUILayout.BeginScrollView(_inspectorScroll, GUILayout.Height(_inspectorHeight));
+            using (new EditorGUILayout.VerticalScope(SectionStyle))
+            {
+                DrawDetailsSection();
+            }
+
+            EditorGUILayout.EndScrollView();
+
+            DrawFooter();
+            HandleShortcuts();
 
             // A drag can end anywhere (even outside a cell or the window), so end it globally.
             if (Event.current.type is EventType.MouseUp or EventType.Ignore)
             {
                 _isDragSelecting = false;
+                _isResizingInspector = false;
             }
         }
 
-        /// <summary>Wraps a section's contents in a bordered box with spacing, for visual separation.</summary>
-        private static void DrawBoxedSection(System.Action drawContent)
+        /// <summary>Tab strip plus window-wide actions, drawn as a standard editor toolbar.</summary>
+        private void DrawToolbar()
         {
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            drawContent();
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(6f);
-        }
-
-        private void DrawTabs()
-        {
-            EditorGUI.BeginChangeCheck();
-            _tab = (WindowTab)GUILayout.Toolbar((int)_tab, TabLabels, GUILayout.Height(24f));
-            if (EditorGUI.EndChangeCheck())
+            using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
             {
-                // Grid state belongs to the previous tab's sprite list.
-                _focusedConfig = null;
-                _isDragSelecting = false;
-                _scroll = Vector2.zero;
-                _detailsScroll = Vector2.zero;
-            }
+                for (int i = 0; i < TabLabels.Length; i++)
+                {
+                    bool active = (int)_tab == i;
+                    if (GUILayout.Toggle(active, TabLabels[i], EditorStyles.toolbarButton, GUILayout.Width(104f)) && !active)
+                    {
+                        SwitchTab((WindowTab)i);
+                    }
+                }
 
-            EditorGUILayout.Space(6f);
+                GUILayout.FlexibleSpace();
+
+                GUIContent refresh = EditorGUIUtility.IconContent("Refresh");
+                refresh.tooltip = "Reload the sprites from disk.";
+                if (GUILayout.Button(refresh, EditorStyles.toolbarButton, GUILayout.Width(28f)))
+                {
+                    Reload();
+                }
+            }
+        }
+
+        private void SwitchTab(WindowTab tab)
+        {
+            _tab = tab;
+
+            // Grid state belongs to the previous tab's sprite list.
+            _focusedConfig = null;
+            _isDragSelecting = false;
+            _scroll = Vector2.zero;
+            _inspectorScroll = Vector2.zero;
+            GUI.FocusControl(null);
+        }
+
+        private void Reload()
+        {
+            switch (_tab)
+            {
+                case WindowTab.Repack:
+                    LoadRepackSet();
+                    break;
+                case WindowTab.Merge:
+                    LoadMergeSet();
+                    break;
+                default:
+                    RefreshConfigs();
+                    break;
+            }
         }
 
         private void DrawSourceSection()
         {
-            EditorGUILayout.LabelField("Source", EditorStyles.boldLabel);
             EditorGUI.BeginChangeCheck();
             _sourceFolder = (DefaultAsset)EditorGUILayout.ObjectField(
-                "Sprites Folder", _sourceFolder, typeof(DefaultAsset), false);
+                new GUIContent("Sprites Folder", "Every texture in this folder is packed into the atlas."),
+                _sourceFolder, typeof(DefaultAsset), false);
             if (EditorGUI.EndChangeCheck() && _sourceFolder != null)
             {
                 RefreshConfigs();
             }
+
+            _atlasName = EditorGUILayout.TextField(
+                new GUIContent("Atlas Name", "File name of the atlas written into the sprites folder."), _atlasName);
         }
 
-        private void DrawSettingsSection()
+        /// <summary>Padding, size limit and power-of-two settings, shared by every tab and folded away by default.</summary>
+        private void DrawPackingSettings()
         {
-            EditorGUILayout.LabelField("Settings", EditorStyles.boldLabel);
-            if (_tab == WindowTab.Pack)
+            DrawSeparator();
+            string summary = _showPackingSettings
+                ? "Packing"
+                : $"Packing  ({_padding}px padding, max {_maxAtlasSize}, {(_forcePowerOfTwo ? "power of two" : "trimmed")})";
+            _showPackingSettings = EditorGUILayout.BeginFoldoutHeaderGroup(_showPackingSettings, summary);
+            if (_showPackingSettings)
             {
-                _atlasName = EditorGUILayout.TextField("Atlas Name", _atlasName);
+                using (new EditorGUILayout.VerticalScope(SectionStyle))
+                {
+                    _padding = Mathf.Clamp(EditorGUILayout.IntField("Padding (px)", _padding), 0, 64);
+                    _maxAtlasSize = EditorGUILayout.IntPopup(
+                        "Max Atlas Size",
+                        _maxAtlasSize,
+                        new[] { "512", "1024", "2048", "4096", "8192" },
+                        new[] { 512, 1024, 2048, 4096, 8192 });
+                    _forcePowerOfTwo = EditorGUILayout.Toggle(
+                        new GUIContent(
+                            "Force Power of Two",
+                            "Off (recommended): the atlas is trimmed to the smallest 4px-aligned size that fits. " +
+                            "On: both dimensions are rounded up to a power of two, which can waste most of the texture."),
+                        _forcePowerOfTwo);
+                }
             }
 
-            _padding = Mathf.Clamp(EditorGUILayout.IntField("Padding (px)", _padding), 0, 64);
-            _maxAtlasSize = EditorGUILayout.IntPopup(
-                "Max Atlas Size",
-                _maxAtlasSize,
-                new[] { "512", "1024", "2048", "4096", "8192" },
-                new[] { 512, 1024, 2048, 4096, 8192 });
-            _forcePowerOfTwo = EditorGUILayout.Toggle(
-                new GUIContent(
-                    "Force Power of Two",
-                    "Off (recommended): the atlas is trimmed to the smallest 4px-aligned size that fits. " +
-                    "On: both dimensions are rounded up to a power of two, which can waste most of the texture."),
-                _forcePowerOfTwo);
+            EditorGUILayout.EndFoldoutHeaderGroup();
         }
 
-        private void DrawBulkToolbar()
+        /// <summary>Grid header: count, selection helpers, search and thumbnail size.</summary>
+        private void DrawGridToolbar()
         {
-            using (new EditorGUILayout.HorizontalScope())
+            List<SpriteBorderConfig> configs = ActiveConfigs;
+            int selectedCount = configs.Count(config => config.Selected);
+            string noun = _tab == WindowTab.Pack ? "Sprites" : "Slices";
+
+            using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
             {
-                EditorGUILayout.LabelField("9-Slice Borders", EditorStyles.boldLabel);
-                if (GUILayout.Button("Refresh", GUILayout.Width(70f)))
+                GUILayout.Label(
+                    selectedCount > 0 ? $"{noun}  ·  {selectedCount} of {configs.Count} selected" : $"{noun}  ·  {configs.Count}",
+                    EditorStyles.miniLabel);
+                GUILayout.FlexibleSpace();
+
+                using (new EditorGUI.DisabledScope(configs.Count == 0))
                 {
-                    switch (_tab)
+                    if (_tab == WindowTab.Repack && _repackSet.IsLoaded && _repackSet.Atlases.Count == 1 &&
+                        GUILayout.Button(
+                            new GUIContent("Duplicates", "Select every slice whose pixels exactly match an earlier slice."),
+                            EditorStyles.toolbarButton))
                     {
-                        case WindowTab.Repack:
-                            LoadRepackSet();
-                            break;
-                        case WindowTab.Merge:
-                            LoadMergeSet();
-                            break;
-                        default:
-                            RefreshConfigs();
-                            break;
+                        SelectDuplicateSlices(_repackSet.Atlases[0]);
+                    }
+
+                    if (GUILayout.Button(new GUIContent("All", "Select all visible sprites (Ctrl/Cmd+A)."), EditorStyles.toolbarButton))
+                    {
+                        SetSelected(VisibleConfigs, true);
+                    }
+
+                    if (GUILayout.Button(new GUIContent("None", "Clear the selection (Esc)."), EditorStyles.toolbarButton))
+                    {
+                        SetAllSelected(false);
                     }
                 }
-            }
 
-            _autoTolerance = EditorGUILayout.Slider("Auto Tolerance", _autoTolerance, 0f, 0.25f);
-
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                if (GUILayout.Button("Select All"))
-                {
-                    SetAllSelected(true);
-                }
-
-                if (GUILayout.Button("Select None"))
-                {
-                    SetAllSelected(false);
-                }
+                GUILayout.Space(6f);
+                _searchField ??= new SearchField();
+                _search = _searchField.OnToolbarGUI(_search, GUILayout.MinWidth(80f), GUILayout.MaxWidth(180f));
+                GUILayout.Space(6f);
+                _thumbSize = GUILayout.HorizontalSlider(_thumbSize, MinThumbSize, MaxThumbSize, GUILayout.Width(64f));
+                GUILayout.Space(4f);
             }
         }
 
-        /// <summary>Draws a wrapping grid of clickable sprite thumbnails, resizable between a fixed minimum and its full content height.</summary>
+        /// <summary>Wrapping grid of clickable thumbnails that fills the height left over by the other sections.</summary>
         private void DrawSpriteGrid()
         {
-            EditorGUILayout.LabelField("Sprites", EditorStyles.boldLabel);
+            List<SpriteBorderConfig> items = VisibleConfigs;
 
-            if (ActiveConfigs.Count == 0)
+            // IMGUI won't stretch a group into the window's spare height, so size it from the
+            // previous repaint's measurements of everything around it.
+            float height = Mathf.Max(MinGridHeight, position.height - _gridTop - SplitterHeight - _inspectorHeight - _footerHeight);
+            Rect area = EditorGUILayout.BeginVertical(GUILayout.Height(height));
+            if (Event.current.type == EventType.Repaint)
             {
-                EditorGUILayout.HelpBox(
-                    _tab switch
-                    {
-                        WindowTab.Repack => "Assign a sliced atlas to list its slices.",
-                        WindowTab.Merge => "Add the sliced atlases to merge to list their slices.",
-                        _ => "Assign a folder and click Refresh to list its sprites."
-                    },
-                    MessageType.Info);
+                EditorGUI.DrawRect(area, GridBackgroundColor);
+                if (Mathf.Abs(area.y - _gridTop) > 0.5f)
+                {
+                    _gridTop = area.y;
+                    Repaint();
+                }
+            }
+
+            if (items.Count == 0)
+            {
+                GUILayout.FlexibleSpace();
+                GUILayout.Label(EmptyGridHint(), HintStyle);
+                GUILayout.FlexibleSpace();
+                EditorGUILayout.EndVertical();
                 return;
             }
 
-            DrawResizableSpriteGrid(ActiveConfigs, ref _scroll, ref _gridHeight, ref _isResizingGrid, MinGridHeight);
-        }
-
-        /// <summary>
-        /// Draws a wrapping, resizable grid of thumbnails for the given sprites, with a drag
-        /// handle beneath it clamped between <paramref name="minHeight"/> and the height needed
-        /// to fit every row without scrolling.
-        /// </summary>
-        private void DrawResizableSpriteGrid(
-            List<SpriteBorderConfig> items, ref Vector2 scroll, ref float height, ref bool resizing, float minHeight)
-        {
-            float availableWidth = Mathf.Max(position.width - 24f, CellWidth);
+            // Leave room for the vertical scrollbar so the last column never gets clipped.
+            float availableWidth = Mathf.Max(position.width - GUI.skin.verticalScrollbar.fixedWidth - 8f, CellWidth);
             int columns = Mathf.Max(1, Mathf.FloorToInt(availableWidth / CellWidth));
-            int rows = Mathf.CeilToInt(items.Count / (float)columns);
-            float maxHeight = Mathf.Max(minHeight, rows * CellHeight);
-            height = Mathf.Clamp(height, minHeight, maxHeight);
 
-            scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.Height(height));
+            _scroll = EditorGUILayout.BeginScrollView(_scroll);
             for (int i = 0; i < items.Count; i += columns)
             {
                 EditorGUILayout.BeginHorizontal();
                 int rowEnd = Mathf.Min(i + columns, items.Count);
                 for (int j = i; j < rowEnd; j++)
                 {
-                    DrawSpriteCell(items[j]);
+                    DrawSpriteCell(items, j);
                 }
 
+                GUILayout.FlexibleSpace();
                 EditorGUILayout.EndHorizontal();
             }
 
             EditorGUILayout.EndScrollView();
-
-            if (maxHeight - minHeight > 1f)
-            {
-                DrawResizeHandle(ref height, minHeight, maxHeight, ref resizing);
-            }
+            EditorGUILayout.EndVertical();
         }
 
-        /// <summary>Draws a draggable horizontal splitter that adjusts <paramref name="height"/> within bounds.</summary>
-        private void DrawResizeHandle(ref float height, float minHeight, float maxHeight, ref bool resizing)
+        private string EmptyGridHint()
         {
-            Rect handleRect = GUILayoutUtility.GetRect(position.width, ResizeHandleHeight, GUILayout.ExpandWidth(true));
-            EditorGUI.DrawRect(handleRect, ResizeHandleColor);
-            EditorGUIUtility.AddCursorRect(handleRect, MouseCursor.ResizeVertical);
-
-            if (Event.current.type == EventType.MouseDown && handleRect.Contains(Event.current.mousePosition))
+            if (ActiveConfigs.Count > 0)
             {
-                resizing = true;
+                return $"Nothing matches \"{_search}\".";
+            }
+
+            return _tab switch
+            {
+                WindowTab.Repack => "Assign a sliced atlas to list its slices.",
+                WindowTab.Merge => "Add two or more sliced atlases to list their slices.",
+                _ => "Assign a sprites folder to list its sprites."
+            };
+        }
+
+        /// <summary>Draggable divider between the grid and the selection panel; dragging up grows the panel.</summary>
+        private void DrawInspectorSplitter()
+        {
+            Rect rect = GUILayoutUtility.GetRect(position.width, SplitterHeight, GUILayout.ExpandWidth(true));
+            EditorGUI.DrawRect(new Rect(rect.x, rect.y + rect.height * 0.5f, rect.width, 1f), SeparatorColor);
+            EditorGUIUtility.AddCursorRect(rect, MouseCursor.ResizeVertical);
+
+            // Keep the grid at least at its minimum height whatever the window size.
+            float maxHeight = Mathf.Max(MinInspectorHeight, position.height - _gridTop - MinGridHeight - SplitterHeight - _footerHeight);
+            if (Event.current.type == EventType.MouseDown && rect.Contains(Event.current.mousePosition))
+            {
+                _isResizingInspector = true;
                 Event.current.Use();
             }
-            else if (resizing && Event.current.type == EventType.MouseDrag)
+            else if (_isResizingInspector && Event.current.type == EventType.MouseDrag)
             {
-                height = Mathf.Clamp(height + Event.current.delta.y, minHeight, maxHeight);
+                _inspectorHeight -= Event.current.delta.y;
                 Event.current.Use();
                 Repaint();
             }
 
-            if (Event.current.type is EventType.MouseUp or EventType.Ignore)
+            _inspectorHeight = Mathf.Clamp(_inspectorHeight, MinInspectorHeight, maxHeight);
+        }
+
+        /// <summary>Fixed bottom bar with the tab's status on the left and its primary action on the right.</summary>
+        private void DrawFooter()
+        {
+            Rect footer = EditorGUILayout.BeginVertical();
+            DrawSeparator();
+
+            string status;
+            string label;
+            bool enabled;
+            System.Action action;
+            switch (_tab)
             {
-                resizing = false;
+                case WindowTab.Repack:
+                    status = RepackStatus();
+                    label = "Repack Atlas";
+                    enabled = _repackSet.IsLoaded && _repackSet.Atlases.Count == 1;
+                    action = Repack;
+                    break;
+                case WindowTab.Merge:
+                    status = MergeStatus();
+                    label = "Merge Atlases";
+                    enabled = _mergeSet.IsLoaded && _mergeSet.Atlases.Count >= 2;
+                    action = Merge;
+                    break;
+                default:
+                    status = _sourceFolder != null
+                        ? $"{_borderConfigs.Count} sprites  →  {AssetDatabase.GetAssetPath(_sourceFolder)}/{_atlasName}.png"
+                        : "No folder selected.";
+                    label = "Pack Atlas";
+                    enabled = _sourceFolder != null;
+                    action = Pack;
+                    break;
+            }
+
+            using (new EditorGUILayout.HorizontalScope(SectionStyle))
+            {
+                GUILayout.Label(status, EditorStyles.miniLabel, GUILayout.MinWidth(0f));
+                GUILayout.FlexibleSpace();
+                using (new EditorGUI.DisabledScope(!enabled))
+                {
+                    if (GUILayout.Button(label, GUILayout.Width(FooterButtonWidth), GUILayout.Height(26f)))
+                    {
+                        // Run after this GUI pass: the action may show dialogs and reload the lists being drawn.
+                        EditorApplication.delayCall += () =>
+                        {
+                            action();
+                            Repaint();
+                        };
+                    }
+                }
+            }
+
+            EditorGUILayout.EndVertical();
+            if (Event.current.type == EventType.Repaint && Mathf.Abs(footer.height - _footerHeight) > 0.5f)
+            {
+                _footerHeight = footer.height;
+                Repaint();
             }
         }
 
-        /// <summary>Draws a single thumbnail cell: preview, selection highlight, mode badge, name.</summary>
-        private void DrawSpriteCell(SpriteBorderConfig config)
+        /// <summary>Grid keyboard and command shortcuts: Select All, Escape to deselect, Delete to mark slices.</summary>
+        private void HandleShortcuts()
         {
+            Event current = Event.current;
+            if (EditorGUIUtility.editingTextField)
+            {
+                return;
+            }
+
+            if (current.type is EventType.ValidateCommand or EventType.ExecuteCommand)
+            {
+                bool execute = current.type == EventType.ExecuteCommand;
+                switch (current.commandName)
+                {
+                    case "SelectAll":
+                        if (execute)
+                        {
+                            SetSelected(VisibleConfigs, true);
+                        }
+
+                        current.Use();
+                        break;
+                    case "SoftDelete" or "Delete" when _tab == WindowTab.Repack:
+                        if (execute)
+                        {
+                            List<SpriteBorderConfig> selected = ActiveConfigs.Where(config => config.Selected).ToList();
+                            SetMarkedForDeletion(selected, !selected.All(config => config.MarkedForDeletion));
+                        }
+
+                        current.Use();
+                        break;
+                }
+            }
+            else if (current.type == EventType.KeyDown && current.keyCode == KeyCode.Escape)
+            {
+                SetAllSelected(false);
+                _focusedConfig = null;
+                current.Use();
+                Repaint();
+            }
+        }
+
+        /// <summary>
+        /// Draws one thumbnail cell: preview, selection highlight, mode badge, name. Click selects,
+        /// Ctrl/Cmd+click toggles, Shift+click selects a range, and dragging paints a selection.
+        /// </summary>
+        private void DrawSpriteCell(List<SpriteBorderConfig> items, int index)
+        {
+            SpriteBorderConfig config = items[index];
             Rect cellRect = GUILayoutUtility.GetRect(CellWidth, CellHeight, GUILayout.Width(CellWidth));
 
             if (config.Selected)
@@ -380,7 +601,7 @@ namespace AtlasForge.Editor
                 DrawOutline(cellRect, FocusOutlineColor, FocusOutlineThickness);
             }
 
-            var thumbRect = new Rect(cellRect.x + CellPadding, cellRect.y + CellPadding, ThumbSize, ThumbSize);
+            var thumbRect = new Rect(cellRect.x + CellPadding, cellRect.y + CellPadding, _thumbSize, _thumbSize);
             Texture2D preview = GetPreviewTexture(config);
             if (preview != null)
             {
@@ -401,98 +622,246 @@ namespace AtlasForge.Editor
             }
 
             var labelRect = new Rect(cellRect.x, thumbRect.yMax + 2f, cellRect.width, CellLabelHeight);
-            GUI.Label(labelRect, config.Name, EditorStyles.miniLabel);
+            string size = preview != null ? $"\n{preview.width}×{preview.height}" : "";
+            // Centre names that fit; start long ones at their beginning so the clipped part is the tail.
+            var label = new GUIContent(config.Name, config.Name + size);
+            CellLabelStyle.alignment = CellLabelStyle.CalcSize(label).x > labelRect.width ? TextAnchor.UpperLeft : TextAnchor.UpperCenter;
+            GUI.Label(labelRect, label, CellLabelStyle);
 
-            if (Event.current.type == EventType.MouseDown && cellRect.Contains(Event.current.mousePosition))
+            Event current = Event.current;
+            if (current.type == EventType.MouseDown && current.button == 0 && cellRect.Contains(current.mousePosition))
             {
-                // Shift extends the existing selection; a plain click/drag overrides it,
-                // clearing everything else before this new drag starts painting selections.
-                if (!Event.current.shift)
+                int anchor = _focusedConfig != null ? items.IndexOf(_focusedConfig) : -1;
+                if (EditorGUI.actionKey)
+                {
+                    config.Selected = !config.Selected;
+                }
+                else if (current.shift && anchor >= 0)
+                {
+                    for (int i = Mathf.Min(anchor, index); i <= Mathf.Max(anchor, index); i++)
+                    {
+                        items[i].Selected = true;
+                    }
+                }
+                else
                 {
                     SetAllSelected(false);
+                    config.Selected = true;
+                    _isDragSelecting = true;
                 }
 
-                _isDragSelecting = true;
-                config.Selected = true;
-                _focusedConfig = config;
-                Event.current.Use();
+                // Shift+click keeps the anchor so further ranges grow from the same cell.
+                if (!current.shift || anchor < 0)
+                {
+                    _focusedConfig = config;
+                }
+
+                GUI.FocusControl(null);
+                current.Use();
                 Repaint();
             }
-            else if (_isDragSelecting && Event.current.type == EventType.MouseDrag &&
-                     cellRect.Contains(Event.current.mousePosition))
+            else if (_isDragSelecting && current.type == EventType.MouseDrag && cellRect.Contains(current.mousePosition))
             {
                 config.Selected = true;
                 _focusedConfig = config;
-                Event.current.Use();
+                current.Use();
                 Repaint();
             }
         }
 
         /// <summary>
-        /// Draws a single border-mode/border editor that applies to every sprite currently
-        /// selected in the grid. Applying clears the selection so the values become that
-        /// batch's final state and a fresh selection can be made for the next batch.
+        /// Selection panel: one border editor that applies to every sprite selected in the grid,
+        /// with a 9-slice preview beside it for a single sprite. Applying clears the selection so
+        /// the values become that batch's final state and a fresh selection can be made next.
         /// </summary>
         private void DrawDetailsSection()
         {
-            EditorGUILayout.LabelField("Sprite Details", EditorStyles.boldLabel);
-
             List<SpriteBorderConfig> selected = ActiveConfigs.Where(config => config.Selected).ToList();
             if (selected.Count == 0)
             {
-                EditorGUILayout.HelpBox("Select one or more sprites in the grid to edit their border settings.", MessageType.Info);
+                _detailsLoadedFor = null;
+                GUILayout.Space(12f);
+                GUILayout.Label(
+                    "Select sprites in the grid to edit their 9-slice borders.\n" +
+                    "Ctrl/Cmd+click toggles, Shift+click selects a range, drag to paint.",
+                    HintStyle);
                 return;
             }
 
-            EditorGUILayout.LabelField(
-                selected.Count == 1 ? selected[0].Name : $"{selected.Count} sprites selected",
-                EditorStyles.miniBoldLabel);
-
-            DrawResizableSpriteGrid(selected, ref _detailsScroll, ref _detailsGridHeight, ref _isResizingDetailsGrid, MinDetailsGridHeight);
-            EditorGUILayout.Space();
-
-            _detailsMode = (BorderMode)EditorGUILayout.EnumPopup("Border Mode", _detailsMode);
-
-            if (_detailsMode == BorderMode.Manual)
-            {
-                _detailsUniform = EditorGUILayout.Toggle("Uniform Border", _detailsUniform);
-                if (_detailsUniform)
-                {
-                    _detailsUniformValue = EditorGUILayout.FloatField("Border Size (px)", _detailsUniformValue);
-                    _detailsBorder = new Vector4(_detailsUniformValue, _detailsUniformValue, _detailsUniformValue, _detailsUniformValue);
-                }
-                else
-                {
-                    _detailsBorder = EditorGUILayout.Vector4Field("Border (L, B, R, T)", _detailsBorder);
-                }
-            }
-
-            // A per-pixel guide preview is only meaningful for a single sprite at a time,
-            // since selected sprites may have different dimensions.
             if (selected.Count == 1)
             {
-                Texture2D preview = GetPreviewTexture(selected[0]);
-                if (preview != null)
-                {
-                    Vector4 previewBorder = _detailsMode switch
-                    {
-                        BorderMode.Manual => NineSliceBorderDetector.Clamp(_detailsBorder, preview.width, preview.height),
-                        BorderMode.Auto => GetAutoBorderPreview(selected[0]),
-                        _ => Vector4.zero
-                    };
-                    DrawBorderPreview(preview, previewBorder);
-                }
+                DrawSingleSpriteEditor(selected[0]);
             }
-
-            EditorGUILayout.Space();
-            if (GUILayout.Button($"Apply to Selected ({selected.Count})", GUILayout.Height(24f)))
+            else
             {
-                ApplyDetailsToSelected(selected);
+                _detailsLoadedFor = null;
+                GUILayout.Label($"{selected.Count} sprites selected", EditorStyles.boldLabel);
+                float labelWidth = EditorGUIUtility.labelWidth;
+                EditorGUIUtility.labelWidth = 110f;
+                DrawBorderFields();
+                EditorGUIUtility.labelWidth = labelWidth;
+
+                GUILayout.Space(4f);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button($"Apply to {selected.Count} Sprites", GUILayout.Width(150f)))
+                    {
+                        ApplyDetailsToSelected(selected);
+                    }
+                }
             }
 
             if (_tab == WindowTab.Repack)
             {
+                GUILayout.Space(4f);
+                DrawSeparator();
                 DrawDeletionControls(selected);
+                DrawExportControls(selected);
+            }
+        }
+
+        /// <summary>
+        /// Live editor for one sprite, like the Sprite Editor's border view: the preview's guide
+        /// lines can be dragged, and every change (drag or field) is written straight onto the
+        /// sprite's config. The tab's footer action is what finally writes it to the asset.
+        /// </summary>
+        private void DrawSingleSpriteEditor(SpriteBorderConfig config)
+        {
+            Texture2D preview = GetPreviewTexture(config);
+            if (_detailsLoadedFor != config)
+            {
+                LoadDetailsFrom(config);
+            }
+
+            // Atlas slices can also be moved and resized inside their atlas.
+            bool canEditRect = ActiveSliceSet != null && ActiveSliceSet.TryFindSlice(config, out _, out _);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.Label(config.Name, EditorStyles.boldLabel);
+                GUILayout.FlexibleSpace();
+                if (preview != null)
+                {
+                    GUILayout.Label($"{preview.width}×{preview.height}", EditorStyles.miniLabel);
+                }
+
+                if (canEditRect)
+                {
+                    _editSliceRect = GUILayout.Toolbar(
+                        _editSliceRect ? 1 : 0, SliceEditModeLabels, EditorStyles.miniButton, GUILayout.Width(140f)) == 1;
+                }
+            }
+
+            if (canEditRect && _editSliceRect)
+            {
+                ActiveSliceSet.TryFindSlice(config, out AtlasSlices slices, out int index);
+                DrawSliceRectEditor(config, slices, index);
+                return;
+            }
+
+            EditorGUI.BeginChangeCheck();
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (preview != null)
+                {
+                    Vector4 shown = _detailsMode switch
+                    {
+                        BorderMode.Manual => NineSliceBorderDetector.Clamp(_detailsBorder, preview.width, preview.height),
+                        BorderMode.Auto => GetAutoBorderPreview(config),
+                        _ => Vector4.zero
+                    };
+
+                    // The preview grows with the panel (and widens for wide sprites), leaving room for the fields beside it.
+                    float maxWidth = Mathf.Max(BorderPreviewSize, position.width - 320f);
+                    float height = Mathf.Clamp(_inspectorHeight - 48f, BorderPreviewSize, MaxEditablePreviewSize);
+                    float width = Mathf.Clamp(height * preview.width / preview.height, BorderPreviewSize, maxWidth);
+                    Vector4 dragged = DrawBorderPreview(preview, shown, width, height, true);
+                    if (dragged != shown)
+                    {
+                        // Dragging always produces a per-side manual border, starting from what was shown
+                        // (so an Auto border can be fine-tuned by hand).
+                        _detailsMode = BorderMode.Manual;
+                        _detailsUniform = false;
+                        _detailsBorder = dragged;
+                    }
+
+                    GUILayout.Space(8f);
+                }
+
+                using (new EditorGUILayout.VerticalScope())
+                {
+                    float labelWidth = EditorGUIUtility.labelWidth;
+                    EditorGUIUtility.labelWidth = 110f;
+                    DrawBorderFields();
+                    EditorGUIUtility.labelWidth = labelWidth;
+
+                    GUILayout.Space(4f);
+                    string action = _tab switch
+                    {
+                        WindowTab.Repack => "Repack Atlas",
+                        WindowTab.Merge => "Merge Atlases",
+                        _ => "Pack Atlas"
+                    };
+                    GUILayout.Label(
+                        $"Drag the green guides on the preview to set the border. Changes are written when you click {action}.",
+                        EditorStyles.wordWrappedMiniLabel);
+                }
+            }
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                config.Mode = _detailsMode;
+                if (_detailsMode == BorderMode.Manual)
+                {
+                    config.Border = _detailsBorder;
+                }
+            }
+        }
+
+        /// <summary>Loads a sprite's current border into the editing fields.</summary>
+        private void LoadDetailsFrom(SpriteBorderConfig config)
+        {
+            _detailsLoadedFor = config;
+            _detailsMode = config.Mode;
+            _detailsBorder = config.Mode == BorderMode.Manual ? config.Border : Vector4.zero;
+            Vector4 border = _detailsBorder;
+            _detailsUniform = border.x == border.y && border.y == border.z && border.z == border.w;
+            _detailsUniformValue = border.x;
+            GUI.FocusControl(null);
+        }
+
+        /// <summary>Border mode as a segmented control, followed by the fields that mode needs.</summary>
+        private void DrawBorderFields()
+        {
+            Rect modeRect = EditorGUI.PrefixLabel(EditorGUILayout.GetControlRect(), new GUIContent("9-Slice Border"));
+            _detailsMode = (BorderMode)GUI.Toolbar(modeRect, (int)_detailsMode, BorderModeLabels, EditorStyles.miniButton);
+
+            switch (_detailsMode)
+            {
+                case BorderMode.Manual:
+                    _detailsUniform = EditorGUILayout.Toggle("Uniform", _detailsUniform);
+                    if (_detailsUniform)
+                    {
+                        _detailsUniformValue = EditorGUILayout.FloatField("Size (px)", _detailsUniformValue);
+                        _detailsBorder = new Vector4(_detailsUniformValue, _detailsUniformValue, _detailsUniformValue, _detailsUniformValue);
+                    }
+                    else
+                    {
+                        _detailsBorder.x = EditorGUILayout.FloatField("Left", _detailsBorder.x);
+                        _detailsBorder.z = EditorGUILayout.FloatField("Right", _detailsBorder.z);
+                        _detailsBorder.w = EditorGUILayout.FloatField("Top", _detailsBorder.w);
+                        _detailsBorder.y = EditorGUILayout.FloatField("Bottom", _detailsBorder.y);
+                    }
+
+                    break;
+                case BorderMode.Auto:
+                    _autoTolerance = EditorGUILayout.Slider(
+                        new GUIContent("Tolerance", "How different neighbouring pixels may be and still count as the stretchable middle. Shared by every Auto sprite."),
+                        _autoTolerance, 0f, 0.25f);
+                    break;
+                default:
+                    EditorGUILayout.LabelField(" ", "No 9-slice border.", EditorStyles.miniLabel);
+                    break;
             }
         }
 
@@ -514,43 +883,168 @@ namespace AtlasForge.Editor
             Repaint();
         }
 
-        /// <summary>Draws an enlarged sprite preview with 9-slice guide lines overlaid.</summary>
-        private void DrawBorderPreview(Texture2D texture, Vector4 border)
+        /// <summary>
+        /// Draws an enlarged sprite preview over a transparency checkerboard, with 9-slice guide
+        /// lines overlaid. When <paramref name="editable"/>, each guide can be dragged with the
+        /// mouse (snapping to whole pixels, never crossing its opposite guide); returns the
+        /// border after any drag.
+        /// </summary>
+        private Vector4 DrawBorderPreview(Texture2D texture, Vector4 border, float width, float height, bool editable)
         {
-            Rect bounds = GUILayoutUtility.GetRect(BorderPreviewSize, BorderPreviewSize, GUILayout.Width(BorderPreviewSize));
+            Rect bounds = GUILayoutUtility.GetRect(width, height, GUILayout.Width(width), GUILayout.Height(height));
             Rect imageRect = FitRect(bounds, texture.width, texture.height);
-            GUI.DrawTexture(imageRect, texture, ScaleMode.ScaleToFit);
-
-            if (border == Vector4.zero)
-            {
-                return;
-            }
-
             float scaleX = imageRect.width / texture.width;
             float scaleY = imageRect.height / texture.height;
 
-            float leftX = imageRect.x + border.x * scaleX;
-            float rightX = imageRect.xMax - border.z * scaleX;
-            // Border.y/w are measured from the bottom-left origin (sprite convention);
-            // GUI space grows downward, so top/bottom guides are flipped accordingly.
-            float topY = imageRect.y + border.w * scaleY;
-            float bottomY = imageRect.yMax - border.y * scaleY;
-
-            EditorGUI.DrawRect(new Rect(leftX, imageRect.y, 1f, imageRect.height), GuideColor);
-            EditorGUI.DrawRect(new Rect(rightX, imageRect.y, 1f, imageRect.height), GuideColor);
-            EditorGUI.DrawRect(new Rect(imageRect.x, topY, imageRect.width, 1f), GuideColor);
-            EditorGUI.DrawRect(new Rect(imageRect.x, bottomY, imageRect.width, 1f), GuideColor);
-        }
-
-        private void DrawPackButton()
-        {
-            using (new EditorGUI.DisabledScope(_sourceFolder == null))
+            // Guide positions in GUI space, indexed like the border: x = left, y = bottom, z = right, w = top.
+            // Border.y/w are measured from the bottom-left origin (sprite convention); GUI space grows
+            // downward, so the bottom/top guides are flipped accordingly.
+            float[] guides =
             {
-                if (GUILayout.Button("Pack Atlas", GUILayout.Height(32f)))
+                imageRect.x + border.x * scaleX,
+                imageRect.yMax - border.y * scaleY,
+                imageRect.xMax - border.z * scaleX,
+                imageRect.y + border.w * scaleY
+            };
+
+            int controlId = GUIUtility.GetControlID(FocusType.Passive, bounds);
+            Event current = Event.current;
+            if (editable)
+            {
+                for (int i = 0; i < 4; i++)
                 {
-                    Pack();
+                    EditorGUIUtility.AddCursorRect(
+                        GuideHitRect(imageRect, guides[i], i),
+                        IsVerticalGuide(i) ? MouseCursor.ResizeHorizontal : MouseCursor.ResizeVertical,
+                        controlId);
+                }
+
+                switch (current.GetTypeForControl(controlId))
+                {
+                    case EventType.MouseDown when current.button == 0:
+                        _draggedGuide = NearestGuide(imageRect, guides, current.mousePosition);
+                        if (_draggedGuide >= 0)
+                        {
+                            GUIUtility.hotControl = controlId;
+                            current.Use();
+                        }
+
+                        break;
+                    case EventType.MouseDrag when GUIUtility.hotControl == controlId && _draggedGuide >= 0:
+                        border[_draggedGuide] = GuideValue(_draggedGuide, current.mousePosition, imageRect, scaleX, scaleY, border, texture);
+                        GUI.changed = true;
+                        current.Use();
+                        break;
+                    case EventType.MouseUp when GUIUtility.hotControl == controlId:
+                        GUIUtility.hotControl = 0;
+                        _draggedGuide = -1;
+                        current.Use();
+                        break;
                 }
             }
+
+            if (current.type != EventType.Repaint)
+            {
+                return border;
+            }
+
+            EditorGUI.DrawRect(bounds, GridBackgroundColor);
+            EditorGUI.DrawTextureTransparent(imageRect, texture, ScaleMode.ScaleToFit);
+            if (border == Vector4.zero && !editable)
+            {
+                return border;
+            }
+
+            // Recompute after a drag so the lines follow the mouse this frame.
+            guides[0] = imageRect.x + border.x * scaleX;
+            guides[1] = imageRect.yMax - border.y * scaleY;
+            guides[2] = imageRect.xMax - border.z * scaleX;
+            guides[3] = imageRect.y + border.w * scaleY;
+            bool dragging = GUIUtility.hotControl == controlId;
+            for (int i = 0; i < 4; i++)
+            {
+                Color color = dragging && _draggedGuide == i ? FocusOutlineColor : GuideColor;
+                Rect line = IsVerticalGuide(i)
+                    ? new Rect(guides[i], imageRect.y, 1f, imageRect.height)
+                    : new Rect(imageRect.x, guides[i], imageRect.width, 1f);
+                EditorGUI.DrawRect(line, color);
+
+                if (editable)
+                {
+                    // A small square grip in the middle of each guide, as in the Sprite Editor.
+                    Vector2 middle = IsVerticalGuide(i) ? new Vector2(guides[i], imageRect.center.y) : new Vector2(imageRect.center.x, guides[i]);
+                    EditorGUI.DrawRect(new Rect(middle.x - GuideGripSize * 0.5f, middle.y - GuideGripSize * 0.5f, GuideGripSize, GuideGripSize), color);
+                }
+            }
+
+            if (dragging && _draggedGuide >= 0)
+            {
+                var label = new GUIContent($"{BorderSideNames[_draggedGuide]} {border[_draggedGuide]:0} px");
+                Vector2 labelSize = EditorStyles.helpBox.CalcSize(label);
+                var labelRect = new Rect(bounds.x + 4f, bounds.y + 4f, labelSize.x, labelSize.y);
+                GUI.Label(labelRect, label, EditorStyles.helpBox);
+            }
+
+            return border;
+        }
+
+        private static readonly string[] BorderSideNames = { "Left", "Bottom", "Right", "Top" };
+
+        private static bool IsVerticalGuide(int side) => side is 0 or 2;
+
+        /// <summary>The strip around a guide line that grabs it.</summary>
+        private static Rect GuideHitRect(Rect imageRect, float guide, int side) => IsVerticalGuide(side)
+            ? new Rect(guide - GuideHitSize, imageRect.y, GuideHitSize * 2f, imageRect.height)
+            : new Rect(imageRect.x, guide - GuideHitSize, imageRect.width, GuideHitSize * 2f);
+
+        /// <summary>The guide closest to the mouse within grabbing distance, or -1.</summary>
+        private static int NearestGuide(Rect imageRect, float[] guides, Vector2 mouse)
+        {
+            int nearest = -1;
+            float best = GuideHitSize;
+            for (int i = 0; i < 4; i++)
+            {
+                if (!GuideHitRect(imageRect, guides[i], i).Contains(mouse))
+                {
+                    continue;
+                }
+
+                float distance = Mathf.Abs((IsVerticalGuide(i) ? mouse.x : mouse.y) - guides[i]);
+
+                // Ties (e.g. a zero border on both sides of a 1px sprite) go to the side the mouse is on.
+                if (distance <= best)
+                {
+                    best = distance;
+                    nearest = i;
+                }
+            }
+
+            return nearest;
+        }
+
+        /// <summary>
+        /// The whole-pixel border value for a guide dragged to the mouse, stopping 1px short of its
+        /// opposite guide so a stretchable middle always remains (as <see cref="NineSliceBorderDetector.Clamp"/> requires).
+        /// </summary>
+        private static float GuideValue(int side, Vector2 mouse, Rect imageRect, float scaleX, float scaleY, Vector4 border, Texture2D texture)
+        {
+            float value = side switch
+            {
+                0 => (mouse.x - imageRect.x) / scaleX,
+                1 => (imageRect.yMax - mouse.y) / scaleY,
+                2 => (imageRect.xMax - mouse.x) / scaleX,
+                _ => (mouse.y - imageRect.y) / scaleY
+            };
+
+            float limit = (IsVerticalGuide(side) ? texture.width : texture.height) - border[(side + 2) % 4] - 1f;
+            return Mathf.Clamp(Mathf.Round(value), 0f, Mathf.Max(0f, limit));
+        }
+
+        /// <summary>A full-width 1px line between sections.</summary>
+        private static void DrawSeparator()
+        {
+            Rect rect = GUILayoutUtility.GetRect(1f, 1f, GUILayout.ExpandWidth(true));
+            EditorGUI.DrawRect(rect, SeparatorColor);
         }
 
         /// <summary>Syncs the border list with the textures currently in the source folder.</summary>
@@ -588,6 +1082,14 @@ namespace AtlasForge.Editor
         private void SetAllSelected(bool selected)
         {
             foreach (SpriteBorderConfig config in ActiveConfigs)
+            {
+                config.Selected = selected;
+            }
+        }
+
+        private static void SetSelected(IEnumerable<SpriteBorderConfig> configs, bool selected)
+        {
+            foreach (SpriteBorderConfig config in configs)
             {
                 config.Selected = selected;
             }

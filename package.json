@@ -1,8 +1,8 @@
 {
   "name": "com.samicodeslikeit.atlasforge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "displayName": "AtlasForge",
-  "description": "Editor tool for UI sprite atlases: pack a folder of sprites into one tightly packed, sliced atlas with 9-slice borders (manual or auto-detected), repack existing atlases to reclaim empty space, merge several atlases into one, and delete duplicate slices, all while keeping every sprite reference in the project intact.",
+  "description": "Editor tool for UI sprite atlases: pack a folder of sprites into one tightly packed, sliced atlas with 9-slice borders (manual or auto-detected), repack existing atlases to reclaim empty space, merge several atlases into one, delete duplicate slices, edit 9-slice borders and slice rects with the mouse, and export slices as standalone sprites, all while keeping every sprite reference in the project intact.",
   "unity": "2021.3",
   "keywords": [
     "ui",

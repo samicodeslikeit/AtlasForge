@@ -24,6 +24,62 @@ namespace AtlasForge.Editor
         /// <summary>Each slice's internal ID (the file ID references point at), parallel to <see cref="Entries"/>.</summary>
         public List<long> InternalIds;
 
+        /// <summary>The decoded atlas file, kept so slices can be re-cut after their rect is edited.</summary>
+        public Texture2D Source;
+
+        /// <summary>Each slice's rect in the atlas as imported (source-file pixels, bottom-up), parallel to <see cref="Entries"/>.</summary>
+        public List<RectInt> SourceRects;
+
+        /// <summary>Each slice's current rect: its imported rect, or an edited one its entry was re-cut from.</summary>
+        public List<RectInt> Rects;
+
+        private Color32[] _sourcePixels;
+
+        /// <summary>Whether a slice's rect was edited away from its imported rect.</summary>
+        public bool IsRectEdited(int index) => !Rects[index].Equals(SourceRects[index]);
+
+        /// <summary>
+        /// Moves or resizes a slice: re-cuts its entry texture from <see cref="Source"/> at the
+        /// rect (clamped to the atlas, at least 1px), and records it in <see cref="Rects"/>.
+        /// </summary>
+        public RectInt Recut(int index, RectInt rect)
+        {
+            rect = ClampRect(rect);
+            _sourcePixels ??= Source.GetPixels32();
+
+            AtlasSpriteEntry entry = Entries[index];
+            var texture = new Texture2D(rect.width, rect.height, TextureFormat.RGBA32, false)
+            {
+                name = entry.Name,
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            texture.SetPixels32(AtlasRepacker.CopyRegion(_sourcePixels, Width, rect));
+            texture.Apply();
+
+            if (entry.Texture != null)
+            {
+                Object.DestroyImmediate(entry.Texture);
+            }
+
+            entry.Texture = texture;
+            entry.X = rect.x;
+            entry.Y = rect.y;
+            entry.Width = rect.width;
+            entry.Height = rect.height;
+            Rects[index] = rect;
+            return rect;
+        }
+
+        /// <summary>Keeps a rect inside the atlas and at least 1x1.</summary>
+        public RectInt ClampRect(RectInt rect)
+        {
+            int xMin = Mathf.Clamp(rect.xMin, 0, Width - 1);
+            int yMin = Mathf.Clamp(rect.yMin, 0, Height - 1);
+            int xMax = Mathf.Clamp(rect.xMax, xMin + 1, Width);
+            int yMax = Mathf.Clamp(rect.yMax, yMin + 1, Height);
+            return new RectInt(xMin, yMin, xMax - xMin, yMax - yMin);
+        }
+
         public void Dispose()
         {
             foreach (AtlasSpriteEntry entry in Entries)
@@ -35,6 +91,12 @@ namespace AtlasForge.Editor
             }
 
             Entries.Clear();
+            if (Source != null)
+            {
+                Object.DestroyImmediate(Source);
+            }
+
+            _sourcePixels = null;
         }
     }
 
@@ -95,9 +157,15 @@ namespace AtlasForge.Editor
                 Width = source.width,
                 Height = source.height,
                 Entries = new List<AtlasSpriteEntry>(sprites.arraySize),
-                InternalIds = new List<long>(sprites.arraySize)
+                InternalIds = new List<long>(sprites.arraySize),
+                Source = source,
+                SourceRects = new List<RectInt>(sprites.arraySize),
+                Rects = new List<RectInt>(sprites.arraySize)
             };
+            source.hideFlags = HideFlags.HideAndDontSave;
 
+            // The slices own the decoded source from here on (Dispose destroys it).
+            bool loadedOk = false;
             try
             {
                 Color32[] pixels = source.GetPixels32();
@@ -141,15 +209,21 @@ namespace AtlasForge.Editor
                         Border = sprite.FindPropertyRelative("m_Border").vector4Value
                     });
                     loaded.InternalIds.Add(internalId);
+                    loaded.SourceRects.Add(rect);
+                    loaded.Rects.Add(rect);
                 }
 
                 slices = loaded;
                 error = null;
+                loadedOk = true;
                 return true;
             }
             finally
             {
-                Object.DestroyImmediate(source);
+                if (!loadedOk)
+                {
+                    Object.DestroyImmediate(source);
+                }
             }
         }
 
@@ -229,6 +303,12 @@ namespace AtlasForge.Editor
                 {
                     AtlasSpriteEntry entry = slices.Entries[entryIndex];
                     sprite.FindPropertyRelative("m_Rect").rectValue = new Rect(entry.X, entry.Y, entry.Width, entry.Height);
+                }
+                else if (slices.IsRectEdited(entryIndex))
+                {
+                    // Unpacked layout: an edited rect just points the sprite at different atlas pixels.
+                    RectInt rect = slices.Rects[entryIndex];
+                    sprite.FindPropertyRelative("m_Rect").rectValue = new Rect(rect.x, rect.y, rect.width, rect.height);
                 }
             }
 
@@ -335,7 +415,7 @@ namespace AtlasForge.Editor
         }
 
         /// <summary>Copies a sub-rectangle out of a bottom-up, row-major pixel buffer.</summary>
-        private static Color32[] CopyRegion(Color32[] pixels, int textureWidth, RectInt rect)
+        internal static Color32[] CopyRegion(Color32[] pixels, int textureWidth, RectInt rect)
         {
             var region = new Color32[rect.width * rect.height];
             for (int row = 0; row < rect.height; row++)

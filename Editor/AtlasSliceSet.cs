@@ -78,6 +78,20 @@ namespace AtlasForge.Editor
 
                     config.Name = entry.Name;
                     config.AssetPath = slices.AtlasPath;
+
+                    // Re-apply a rect edit that survived a reload, unless the atlas changed under it.
+                    if (config.SliceRectEdited)
+                    {
+                        if (config.SliceRectBase.Equals(slices.SourceRects[i]))
+                        {
+                            config.SliceRect = slices.Recut(i, config.SliceRect);
+                        }
+                        else
+                        {
+                            config.SliceRectEdited = false;
+                        }
+                    }
+
                     synced.Add(config);
                     _configsByKey[key] = config;
                     _textures[key] = entry.Texture;
@@ -85,6 +99,55 @@ namespace AtlasForge.Editor
             }
 
             Configs = synced;
+        }
+
+        /// <summary>Finds the loaded atlas and index of a slice config; false if it isn't loaded.</summary>
+        public bool TryFindSlice(SpriteBorderConfig config, out AtlasSlices slices, out int index)
+        {
+            if (_atlases != null)
+            {
+                foreach (AtlasSlices atlas in _atlases)
+                {
+                    if (atlas.AtlasGuid != config.AtlasGuid)
+                    {
+                        continue;
+                    }
+
+                    index = atlas.InternalIds.IndexOf(config.SliceId);
+                    if (index >= 0)
+                    {
+                        slices = atlas;
+                        return true;
+                    }
+                }
+            }
+
+            slices = null;
+            index = -1;
+            return false;
+        }
+
+        /// <summary>Moves or resizes a slice: re-cuts it at the rect and records the edit on its config.</summary>
+        public void SetSliceRect(SpriteBorderConfig config, RectInt rect)
+        {
+            if (!TryFindSlice(config, out AtlasSlices slices, out int index))
+            {
+                return;
+            }
+
+            config.SliceRect = slices.Recut(index, rect);
+            config.SliceRectBase = slices.SourceRects[index];
+            config.SliceRectEdited = slices.IsRectEdited(index);
+            _textures[(config.AtlasGuid, config.SliceId)] = slices.Entries[index].Texture;
+        }
+
+        /// <summary>Forgets every rect edit, e.g. once they've been written to the atlases.</summary>
+        public void ClearRectEdits()
+        {
+            foreach (SpriteBorderConfig config in Configs)
+            {
+                config.SliceRectEdited = false;
+            }
         }
 
         /// <summary>Releases the cut-out slice textures; configs are kept.</summary>

@@ -357,7 +357,7 @@ namespace AtlasForge.Editor
         }
 
         /// <summary>Deep-copies a serialized value (struct, array or leaf) onto another property of the same layout.</summary>
-        private static void CopyValue(SerializedProperty source, SerializedProperty destination)
+        internal static void CopyValue(SerializedProperty source, SerializedProperty destination)
         {
             if (source.propertyType == SerializedPropertyType.String)
             {
