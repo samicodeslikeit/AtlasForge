@@ -21,13 +21,13 @@ https://github.com/samicodeslikeit/AtlasForge.git
 To pin a release, append its tag:
 
 ```
-https://github.com/samicodeslikeit/AtlasForge.git#v1.1.0
+https://github.com/samicodeslikeit/AtlasForge.git#v1.2.0
 ```
 
 Or add it to `Packages/manifest.json`:
 
 ```json
-"com.samicodeslikeit.atlasforge": "https://github.com/samicodeslikeit/AtlasForge.git#v1.1.0"
+"com.samicodeslikeit.atlasforge": "https://github.com/samicodeslikeit/AtlasForge.git#v1.2.0"
 ```
 
 Requires Unity 2021.3 or newer and Git installed on the machine.
@@ -46,6 +46,8 @@ Reclaims the empty space in an atlas that's already sliced, in place, and lets y
 - Before anything is written, you're warned about any references that would become Missing.
 
 **Export** writes the selected slices out as standalone sprite textures. Each exported sprite keeps the atlas's import settings (pixels per unit, filter mode, compression and platform overrides) and the slice's pivot, 9-slice border, outline and physics shape. With one slice selected you can give it a custom name; a batch keeps the slice names. Turn on **Remove from Atlas** to delete the slices from the atlas and redirect every reference to the exported sprites. The remaining slices are then repacked so the atlas shrinks to fit. Leave it off to export a copy.
+
+**Add Sprites** packs standalone textures into the atlas as new slices and repacks it. Pick them from the Project selection or a file browser in the grid toolbar, or drop them onto the grid. Pixels are read straight from each PNG or JPG file, so the texture's own import settings (resizing, compression, texture type) don't affect the slice. A sprite keeps its pivot, 9-slice border, outline and physics shape, and a name already used in the atlas gets a numbered suffix. If anything references the source sprites, you can redirect those references to the new slices. The source files are left in place.
 
 ### Merge Atlases
 Merges several sliced atlases into one of them. Clashing slice names and IDs are resolved automatically, and every reference to the merged-in slices is rewritten to point at the merged atlas. The other atlases can optionally be moved to the trash afterwards.

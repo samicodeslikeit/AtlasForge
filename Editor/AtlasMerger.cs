@@ -344,7 +344,8 @@ namespace AtlasForge.Editor
             return candidate;
         }
 
-        private static long NewUniqueId(HashSet<long> taken)
+        /// <summary>A random nonzero internal ID not in <paramref name="taken"/>; it is added to the set.</summary>
+        internal static long NewUniqueId(HashSet<long> taken)
         {
             long id;
             do

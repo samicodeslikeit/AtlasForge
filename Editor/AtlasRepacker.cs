@@ -232,12 +232,20 @@ namespace AtlasForge.Editor
         /// the rest. With <paramref name="relayout"/> the atlas PNG is also re-rendered from the
         /// kept slices at <paramref name="width"/> x <paramref name="height"/>, each moved to its
         /// entry's packed X/Y; otherwise the layout is untouched. Slices are matched by internal
-        /// ID, so nothing is written if the atlas changed since loading.
+        /// ID, so nothing is written if the atlas changed since loading. <paramref name="added"/>
+        /// slices (packed alongside the kept ones) are appended to the sprite sheet; they need a relayout.
         /// </summary>
         public static bool Apply(
             AtlasSlices slices, IReadOnlyList<Vector4> borders, ICollection<long> deletedIds, bool relayout,
-            int width, int height, out string error)
+            int width, int height, out string error, IReadOnlyList<AddedSprite> added = null)
         {
+            added ??= System.Array.Empty<AddedSprite>();
+            if (added.Count > 0 && !relayout)
+            {
+                error = "Adding slices requires the atlas to be re-laid out.";
+                return false;
+            }
+
             if (AssetImporter.GetAtPath(slices.AtlasPath) is not TextureImporter importer)
             {
                 error = $"'{slices.AtlasPath}' is no longer a texture.";
@@ -282,6 +290,11 @@ namespace AtlasForge.Editor
                     }
                 }
 
+                foreach (AddedSprite sprite in added)
+                {
+                    kept.Add(sprite.Entry);
+                }
+
                 Texture2D atlas = SpriteAtlasBuilder.Render(kept, width, height);
                 File.WriteAllBytes(slices.AtlasPath, atlas.EncodeToPNG());
                 Object.DestroyImmediate(atlas);
@@ -321,6 +334,34 @@ namespace AtlasForge.Editor
                     if (deletedIds.Contains(table.GetArrayElementAtIndex(i).FindPropertyRelative("second").longValue))
                     {
                         table.DeleteArrayElementAtIndex(i);
+                    }
+                }
+            }
+
+            if (added.Count > 0)
+            {
+                var spriteIds = new HashSet<string>();
+                for (int i = 0; i < sprites.arraySize; i++)
+                {
+                    spriteIds.Add(sprites.GetArrayElementAtIndex(i).FindPropertyRelative("m_SpriteID").stringValue);
+                }
+
+                foreach (AddedSprite sprite in added)
+                {
+                    sprites.arraySize++;
+                    SpriteAdder.WriteSlice(sprite, sprites.GetArrayElementAtIndex(sprites.arraySize - 1), spriteIds);
+                }
+
+                // Rebuild the name → ID table to match the grown sprite list, as a merge does.
+                if (table != null)
+                {
+                    table.arraySize = sprites.arraySize;
+                    for (int i = 0; i < sprites.arraySize; i++)
+                    {
+                        SerializedProperty sprite = sprites.GetArrayElementAtIndex(i);
+                        SerializedProperty pair = table.GetArrayElementAtIndex(i);
+                        pair.FindPropertyRelative("first").stringValue = sprite.FindPropertyRelative("m_Name").stringValue;
+                        pair.FindPropertyRelative("second").longValue = sprite.FindPropertyRelative("m_InternalID").longValue;
                     }
                 }
             }

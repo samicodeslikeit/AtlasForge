@@ -17,7 +17,7 @@ namespace AtlasForge.Editor
         private const string PlatformSettingsProperty = "m_PlatformSettings";
 
         /// <summary>Per-sprite data shared by a Multiple-mode slice and a Single-mode sprite sheet.</summary>
-        private static readonly string[] SpriteDataProperties =
+        internal static readonly string[] SpriteDataProperties =
         {
             "m_Outline", "m_CustomData", "m_PhysicsShape", "m_Bones", "m_Vertices", "m_Indices", "m_Edges", "m_Weights"
         };

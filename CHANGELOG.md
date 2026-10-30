@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.0] - 2026-10-30
+
+### Added
+- Repack Atlas: **Add Sprites** packs standalone PNG or JPG textures into the atlas as new slices and repacks it. Add them from the Project selection, a file browser, or by dropping them onto the grid. Pixels come straight from the file, sprites keep their pivot, 9-slice border, outline and physics shape, clashing names get a numbered suffix, and references to the source sprites can be redirected to the new slices.
+
 ## [1.1.0] - 2026-10-29
 
 ### Added

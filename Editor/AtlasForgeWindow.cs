@@ -361,6 +361,11 @@ namespace AtlasForge.Editor
                     EditorStyles.miniLabel);
                 GUILayout.FlexibleSpace();
 
+                if (CanAddToRepackAtlas)
+                {
+                    DrawAddSpritesButton();
+                }
+
                 using (new EditorGUI.DisabledScope(configs.Count == 0))
                 {
                     if (_tab == WindowTab.Repack && _repackSet.IsLoaded && _repackSet.Atlases.Count == 1 &&
@@ -410,6 +415,7 @@ namespace AtlasForge.Editor
                 }
             }
 
+            HandleSpriteDrop(area);
             if (items.Count == 0)
             {
                 GUILayout.FlexibleSpace();
