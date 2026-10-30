@@ -16,7 +16,10 @@ namespace AtlasForge.Editor
         private void DrawAddSpritesButton()
         {
             var content = new GUIContent("Add Sprites", "Pack textures into this atlas as new slices. You can also drop them onto the grid.");
-            if (!EditorGUILayout.DropdownButton(content, FocusType.Passive, EditorStyles.toolbarDropDown))
+
+            // Keep the button's own rect: the menu is anchored under it.
+            Rect buttonRect = GUILayoutUtility.GetRect(content, EditorStyles.toolbarDropDown);
+            if (!EditorGUI.DropdownButton(buttonRect, content, FocusType.Passive, EditorStyles.toolbarDropDown))
             {
                 return;
             }
@@ -34,7 +37,7 @@ namespace AtlasForge.Editor
             }
 
             menu.AddItem(new GUIContent("Browse…"), false, BrowseForSprite);
-            menu.DropDown(GUILayoutUtility.GetLastRect());
+            menu.DropDown(buttonRect);
         }
 
         private void BrowseForSprite()

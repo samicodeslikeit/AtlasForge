@@ -21,13 +21,13 @@ https://github.com/samicodeslikeit/AtlasForge.git
 To pin a release, append its tag:
 
 ```
-https://github.com/samicodeslikeit/AtlasForge.git#v1.2.0
+https://github.com/samicodeslikeit/AtlasForge.git#v1.2.1
 ```
 
 Or add it to `Packages/manifest.json`:
 
 ```json
-"com.samicodeslikeit.atlasforge": "https://github.com/samicodeslikeit/AtlasForge.git#v1.2.0"
+"com.samicodeslikeit.atlasforge": "https://github.com/samicodeslikeit/AtlasForge.git#v1.2.1"
 ```
 
 Requires Unity 2021.3 or newer and Git installed on the machine.

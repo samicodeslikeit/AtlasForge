@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.1] - 2026-10-30
+
+### Fixed
+- The Add Sprites menu now opens under its button instead of at the top of the window.
+
 ## [1.2.0] - 2026-10-30
 
 ### Added
